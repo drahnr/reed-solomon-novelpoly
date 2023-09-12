@@ -32,7 +32,8 @@ macro_rules! instanciate_upper_bound_test {
 					reconstruct::<WrappedShard>,
 					black_box(&BYTES[..PAYLOAD_SIZE_CUTOFF]),
 					VALIDATOR_COUNT,
-				).unwrap();
+				)
+				.unwrap();
 			}
 
 			pub fn bench_encode(crit: &mut Criterion) {
@@ -205,11 +206,9 @@ pub mod parameterized {
 				BenchmarkId::new("naive-reconstruct", param.to_string()),
 				&payload_size,
 				|b, &payload_size| {
-					let encoded = reed_solomon_benches::naive::encode::<WrappedShard>(
-						&BYTES[..payload_size],
-						validator_count,
-					)
-					.unwrap();
+					let encoded =
+						reed_solomon_benches::naive::encode::<WrappedShard>(&BYTES[..payload_size], validator_count)
+							.unwrap();
 					let shards = encoded.clone().into_iter().map(Some).collect::<Vec<_>>();
 
 					b.iter(|| {
@@ -224,11 +223,98 @@ pub mod parameterized {
 			);
 		}
 	}
+
+	fn encode_guts_add_to_group<M: criterion::measurement::Measurement>(
+		group: &mut criterion::BenchmarkGroup<M>,
+		param: impl ToString,
+		n: usize,
+		k: usize,
+		rng: &mut SmallRng,
+	) {
+		use reed_solomon_novelpoly::f2e16::Additive;
+		use rand::Rng;
+		{
+			group.bench_with_input(
+				BenchmarkId::new("novel-poly-guts-encode-faster8", param.to_string()),
+				&(),
+				|b, _| {
+					let dist = rand::distributions::Uniform::new_inclusive(u16::MIN, u16::MAX);
+					let data = Vec::from_iter(rng.sample_iter::<u16, _>(dist).take(n).map(Additive));
+					let mut codeword = vec![Additive::zero(); n];
+					b.iter(|| {
+						reed_solomon_novelpoly::f2e16::encode_low_faster8(
+							black_box(&data),
+							black_box(k),
+							black_box(&mut codeword[..]),
+							black_box(n),
+						);
+					})
+				},
+			);
+		}
+		{
+			group.bench_with_input(BenchmarkId::new("novel-poly-guts-encode-plain", param.to_string()), &(), |b, _| {
+				let dist = rand::distributions::Uniform::new_inclusive(u16::MIN, u16::MAX);
+				let data = Vec::from_iter(rng.sample_iter::<u16, _>(dist).take(n).map(Additive));
+				let mut codeword = vec![Additive::zero(); n];
+				b.iter(|| {
+					reed_solomon_novelpoly::f2e16::encode_low_plain(
+						black_box(&data),
+						black_box(k),
+						black_box(&mut codeword[..]),
+						black_box(n),
+					);
+				})
+			});
+		}
+		{
+			group.bench_with_input(
+				BenchmarkId::new("novel-poly-encode-sub-faster8", param.to_string()),
+				&(),
+				|b, _| {
+					let dist = rand::distributions::Uniform::new_inclusive(u8::MIN, u8::MAX);
+					let data = Vec::from_iter(rng.sample_iter::<u8, _>(dist).take(k * 2));
+					b.iter(|| {
+						reed_solomon_novelpoly::f2e16::encode_sub_faster8(black_box(&data), black_box(n), black_box(k));
+					})
+				},
+			);
+		}
+		{
+			group.bench_with_input(BenchmarkId::new("novel-poly-encode-sub-plain", param.to_string()), &(), |b, _| {
+				let dist = rand::distributions::Uniform::new_inclusive(u8::MIN, u8::MAX);
+				let data = Vec::from_iter(rng.sample_iter::<u8, _>(dist).take(k * 2));
+				b.iter(|| {
+					reed_solomon_novelpoly::f2e16::encode_sub_plain(black_box(&data), black_box(n), black_box(k));
+				})
+			});
+		}
+	}
+
+	pub fn bench_encode_guts(crit: &mut Criterion) {
+		let mut rng = SmallRng::from_seed(SMALL_RNG_SEED);
+		use reed_solomon_novelpoly::f2e16::{Additive8x};
+
+		// factors of 1/2..1/8 are reasonable
+		for f_exp in 1..3 {
+			let f = 1 << f_exp;
+			let mut group = crit.benchmark_group(format!("encode guts n/k={}", f));
+			for k_exp in 4..10 {
+				let k = 1 << k_exp;
+				let n = k * f;
+				assert!(n > k);
+				assert_eq!(n % Additive8x::LANE, 0);
+				assert_eq!(k % Additive8x::LANE, 0);
+				let param = format!("n={n} k={k} (n/k = {f})");
+				encode_guts_add_to_group(&mut group, param, n, k, &mut rng);
+			}
+			group.finish();
+		}
+	}
 }
 
 fn parameterized_criterion() -> Criterion {
-	let crit = Criterion::default().sample_size(10).warm_up_time(Duration::from_millis(100));
-	crit
+	Criterion::default().sample_size(10).warm_up_time(Duration::from_millis(100))
 }
 
 criterion_group!(
@@ -239,6 +325,7 @@ targets =
 	parameterized::bench_reconstruct_2d,
 	parameterized::bench_encode_fixed_1mb_payload,
 	parameterized::bench_reconstruct_fixed_1mb_payload,
+	parameterized::bench_encode_guts,
 );
 
 #[cfg(feature = "upperbounds")]

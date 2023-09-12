@@ -54,10 +54,15 @@ impl CodeParams {
 		// which is true by definition
 		assert!(n * k_po2 <= n_po2 * k);
 
-		if n_po2 > FIELD_SIZE as usize {
+		if n_po2 > FIELD_SIZE {
 			return Err(Error::WantedShardCountTooHigh(n));
 		}
 		Ok(Self { n: n_po2, k: k_po2, wanted_n: n })
+	}
+
+	/// Check if this could use the `faster8` code path, possibly utilizing `avx2` SIMD instructions
+	pub fn is_faster8(&self) -> bool {
+		self.k >= (Additive8x::LANE << 1) && self.n % Additive8x::LANE == 0
 	}
 
 	// make a reed-solomon instance.
@@ -65,11 +70,24 @@ impl CodeParams {
 		ReedSolomon::new(self.n, self.k, self.wanted_n)
 			.expect("this struct is not created with invalid shard number; qed")
 	}
+
+	/// Return the computed `n` value.
+	pub fn n(&self) -> usize {
+		self.n
+	}
+
+	/// Return the computed `k` value.
+	pub fn k(&self) -> usize {
+		self.k
+	}
 }
 
 pub struct ReedSolomon {
+	/// The true number of total shards to be had, derived from `n_wanted`.
 	n: usize,
+	/// The amount of original data shards, that are part of the systematic code.
 	k: usize,
+	/// The size as desired by the user. Strictly smaller than `n`.
 	wanted_n: usize,
 }
 
@@ -114,7 +132,7 @@ impl ReedSolomon {
 			validator_count
 		];
 
-		for (chunk_idx, i) in (0..bytes.len()).into_iter().step_by(k2).enumerate() {
+		for (chunk_idx, i) in (0..bytes.len()).step_by(k2).enumerate() {
 			let end = std::cmp::min(i + k2, bytes.len());
 			assert_ne!(i, end);
 			let data_piece = &bytes[i..end];
